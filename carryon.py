@@ -186,29 +186,9 @@ def package_with_script(script_path, output_path=None, *, include_packages=False
                     print(f"Warning: Couldn't find base path for {module_name}", file=sys.stderr)
                     continue
 
-                # Determine what directory to search for files
-                if include_packages and spec.submodule_search_locations:
-                    search_dir = spec.submodule_search_locations[0]
-                else:
-                    search_dir = os.path.dirname(spec.origin)
-                    # If not including full package, just add this module
-                    if not spec.submodule_search_locations:
-                        arcname = os.path.relpath(spec.origin, base_dir)
-                        add_file_to_zip(zipf, spec.origin, arcname, processed_files)
-                        continue
-
-                # Walk the directory for package files
-                for root, _, files in os.walk(search_dir):
-                    for file in files:
-                        if file.endswith('.pyc'):
-                            continue
-
-                        if not file.endswith('.py'):
-                            continue
-
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, base_dir)
-                        add_file_to_zip(zipf, file_path, arcname, processed_files)
+                # Add just this module file
+                arcname = os.path.relpath(spec.origin, base_dir)
+                add_file_to_zip(zipf, spec.origin, arcname, processed_files)
 
             except Exception as e:
                 print(f"Error packaging {module_name}: {e}", file=sys.stderr)
