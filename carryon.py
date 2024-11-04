@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""Tagalong - Pack your Python script with its dependencies
+"""Carryon - Pack your Python script with its dependencies
 
 # Installation
 
 ```bash
-pip install tagalong
+pip install carryon
 ```
 
 Or better, since this is a command-line tool:
 ```bash
-pipx install tagalong
+pipx install carryon
 ```
 
 # Usage
 
 ```bash
-tagalong script.py
+carryon script.py
 ```
 
 This creates a self-contained executable that includes all non-stdlib dependencies.
@@ -28,15 +28,15 @@ Options:
 
 # How it works
 
-Tagalong appends a ZIP archive with all dependencies to your script, making it
-completely self-contained while still being a valid Python script.
-Running the script automatically adds the ZIP to Python's import path.
+Carryon appends a ZIP archive with all dependencies to your script, making it
+self-contained while still being a valid Python script.
+
+Not a heavyweight solution like PyInstaller and other "checked luggage" tools.
+It still requires a python interpreter.
 
 The script portion can still be edited after packaging - just ensure your editor
 preserves binary data and doesn't add a newline at EOF. For vim, use:
     vim -b script_packaged.py   # binary mode
-or:
-    vim +'set nofixeol' script_packaged.py   # don't add final newline
 
 # License
 
@@ -71,7 +71,7 @@ from importlib.util import find_spec
 from io import BytesIO
 
 # Get stdlib base path using a known stdlib module
-STDLIB_PATH = os.path.dirname(os.path.dirname(codecs.__file__))
+STDLIB_PATH = os.path.abspath(os.path.dirname(codecs.__file__)) + os.sep
 
 # Bootstrap code that will be saved as __main__.py in the zip
 BOOTSTRAP_CODE = b"""exec(compile(
@@ -79,7 +79,7 @@ BOOTSTRAP_CODE = b"""exec(compile(
     open(__loader__.archive, 'rb').read(
         # minimum offset = size of file before zip start:
         min(f[4] for f in __loader__._files.values())
-    ).decode('utf8'),
+    ).decode('utf8', 'surrogateescape'),
     __loader__.archive,     # set filename in code object
     'exec'                  # compile in 'exec' mode
 ))"""
@@ -92,9 +92,6 @@ def get_dependencies(script_path):
 
 def is_stdlib_module(module_name):
     """Check if a module is part of the Python standard library."""
-    if module_name == '__main__':
-        return True
-
     try:
         spec = find_spec(module_name)
         if spec is None or not spec.has_location:  # Built-in or frozen modules
@@ -110,14 +107,12 @@ def get_script_content(script_path):
         # Try to open it as a zip file first
         with zipfile.ZipFile(script_path, 'r') as zf:
             # Get the minimum offset - same method used in __main__.py
-            zip_start = min(f[4] for f in zf.filelist)
-            # Read only the script portion
-            with open(script_path, 'rb') as f:
-                return f.read(zip_start)
+            size = min(f[4] for f in zf.filelist)
     except zipfile.BadZipFile:
-        # Not a zip file, return entire content
-        with open(script_path, 'rb') as f:
-            return f.read()
+        size = 999999999
+
+    with open(script_path, 'rb') as f:
+        return f.read(size)
 
 def find_base_dir(spec):
     """Find which sys.path entry a module is under."""
@@ -143,13 +138,13 @@ def package_with_script(script_path, output_path=None, *, include_resources=Fals
 
     Args:
         script_path: Path to the Python script to package
-        output_path: Output path for packaged script (default: script_packaged.py)
+        output_path: Output path for packaged script (default: script_carryon.py)
         include_resources: Include non-.py files from module directories
         include_packages: Include all files from packages, not just imported modules
         extra_files: List of (file_path, archive_path) tuples to add to the zip
     """
     if output_path is None:
-        output_path = script_path.rsplit('.', 1)[0] + '_packaged.py'
+        output_path = os.path.splitext(script_path)[0] + '_carryon'
 
     # Read original script, truncating any existing ZIP
     script_content = get_script_content(script_path)
@@ -173,6 +168,9 @@ def package_with_script(script_path, output_path=None, *, include_resources=Fals
         # Package dependencies
         modules = get_dependencies(script_path)
         for module_name in modules:
+            if module_name == '__main__':
+                continue
+
             if is_stdlib_module(module_name):
                 continue
 
@@ -218,8 +216,7 @@ def package_with_script(script_path, output_path=None, *, include_resources=Fals
     # Create the final packaged script
     with open(output_path, 'wb') as f:
         f.write(script_content)
-        f.write(b'\n\n')
-        f.write(b'# === Bundled dependencies follow this line ===\n')
+        f.write(b'\n\n# === Bundled dependencies follow this line ===\n')
         f.write(zip_buffer.getvalue())
 
     # Make executable (rwxr-xr-x)
