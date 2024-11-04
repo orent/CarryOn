@@ -65,7 +65,6 @@ import modulefinder
 import sys
 import zipfile
 import codecs
-import importlib.metadata
 from importlib.util import find_spec
 from pathlib import Path
 from io import BytesIO
@@ -93,13 +92,12 @@ def get_dependencies(script_path):
 def is_stdlib_module(module_name):
     """Check if a module is part of the Python standard library."""
     try:
-        spec = find_spec(module_name.partition('.')[0])
+        spec = find_spec(module_name)
         if spec is None or not spec.has_location:  # Built-in or frozen modules
             return True
 
-        return Path(spec.origin).resolve().is_relative_to(STDLIB_PATH)
-    except (ImportError, AttributeError):
-        return False
+        stdlib_path = str(STDLIB_PATH)
+        return str(Path(spec.origin).resolve()).startswith(stdlib_path)
 
 def get_script_content(script_path):
     """Read script content and truncate any existing ZIP."""
@@ -124,8 +122,11 @@ def find_base_dir(spec, script_path):
         else:
             path = Path(path).resolve()
             
-        if module_path.is_relative_to(path):
+        try:
+            module_path.relative_to(path)
             return path
+        except ValueError:
+            continue
     return None
 
 def get_package_files(dist):
@@ -141,6 +142,7 @@ def get_package_files(dist):
 
 def build_package_map():
     """Build mapping of resolved file paths to their distribution packages."""
+    import importlib.metadata  # Only imported when package mode is used
     package_map = {}  # Path -> (distribution, package_base)
     
     for dist in importlib.metadata.distributions():
@@ -169,7 +171,7 @@ def package_with_script(script_path, output_path=None, *, include_packages=False
         extra_files: List of (file_path, archive_path) tuples to add to the zip
     """
     if output_path is None:
-        output_path = script_path.with_stem(script_path.stem + '_carryon')
+        output_path = script_path.parent / (script_path.stem + '_carryon' + script_path.suffix)
 
     script_content = get_script_content(script_path)
     
