@@ -1,4 +1,4 @@
-Carryon - Pack your Python script with its dependencies
+CarryOn - Pack your Python script with its dependencies
 
 # Installation
 
