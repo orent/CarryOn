@@ -142,17 +142,54 @@ def get_package_files(dist):
         print(f"Warning: Error processing package {dist.name}: {e}", 
               file=sys.stderr)
 
-def build_package_map():
-    """Build mapping of resolved file paths to their distribution packages."""
-    import importlib.metadata  # Only imported when package mode is used
-    package_map = {}  # Path -> (distribution, package_base)
+def _build_package_map_metadata():
+    """Build package maps using importlib.metadata."""
+    from importlib.metadata import distributions
+    file_to_pkg = {}      # Path -> pkg_name
+    pkg_to_files = {}     # pkg_name -> set(Path)
+    pkg_to_base = {}      # pkg_name -> base_path
     
-    for dist in importlib.metadata.distributions():
-        for path, base in get_package_files(dist):
-            package_map[path] = (dist, base)
+    for dist in distributions():
+        base = dist.locate_file('.').resolve()
+        pkg_to_base[dist.name] = base
+        for path, _ in get_package_files(dist):
+            file_to_pkg[path] = dist.name
+            pkg_to_files.setdefault(dist.name, set()).add(path)
             
-    return package_map
+    return file_to_pkg, pkg_to_files, pkg_to_base
 
+def _build_package_map_resources():
+    """Build package maps using pkg_resources."""
+    import pip._vendor.pkg_resources as pkg_resources
+    file_to_pkg = {}
+    pkg_to_files = {}
+    pkg_to_base = {}
+    
+    for dist in pkg_resources.working_set:
+        base = Path(dist.location)
+        pkg_to_base[dist.key] = base
+        try:
+            record = base / f"{dist.egg_info}/RECORD"
+            if record.exists():
+                with open(record) as f:
+                    for line in f:
+                        filename = line.split(',')[0]
+                        if not filename.endswith('.pyc'):
+                            path = base / filename
+                            file_to_pkg[path] = dist.key
+                            pkg_to_files.setdefault(dist.key, set()).add(path)
+        except Exception as e:
+            print(f"Warning: Error processing package {dist.key}: {e}", 
+                  file=sys.stderr)
+        
+    return file_to_pkg, pkg_to_files, pkg_to_base
+
+try:
+    from importlib.metadata import distributions  # just to test availability
+    build_package_map = _build_package_map_metadata
+except ImportError:
+    build_package_map = _build_package_map_resources
+            
 def add_file_to_zip(zipf, file_path, arcname, processed_files):
     """Add a file to the zip if not already processed."""
     if arcname in processed_files:
