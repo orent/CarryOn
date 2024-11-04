@@ -22,7 +22,6 @@ This creates a self-contained executable that includes all non-stdlib dependenci
 
 Options:
 - `-o, --output` - Specify output file
-- `-r, --resources` - Include non-Python files
 - `-p, --packages` - Include complete packages
 - `-f, --file FILE ARCNAME` - Add extra files to the bundle
 
@@ -114,11 +113,16 @@ def get_script_content(script_path):
     with open(script_path, 'rb') as f:
         return f.read(size)
 
-def find_base_dir(spec):
+def find_base_dir(spec, script_path):
     """Find which sys.path entry a module is under."""
     module_path = os.path.abspath(spec.origin)
+    
     for path in sys.path:
-        path = os.path.abspath(path)
+        if path == '':
+            path = os.path.dirname(os.path.abspath(script_path))
+        else:
+            path = os.path.abspath(path)
+            
         if module_path.startswith(path + os.sep):
             return path
     return None
@@ -131,15 +135,13 @@ def add_file_to_zip(zipf, file_path, arcname, processed_files):
     zipf.write(file_path, arcname)
     return True
 
-def package_with_script(script_path, output_path=None, *, include_resources=False,
-                       include_packages=False, extra_files=None):
+def package_with_script(script_path, output_path=None, *, include_packages=False, extra_files=None):
     """
     Package dependencies with the script and create self-contained file.
 
     Args:
         script_path: Path to the Python script to package
         output_path: Output path for packaged script (default: script_carryon.py)
-        include_resources: Include non-.py files from module directories
         include_packages: Include all files from packages, not just imported modules
         extra_files: List of (file_path, archive_path) tuples to add to the zip
     """
@@ -179,7 +181,7 @@ def package_with_script(script_path, output_path=None, *, include_resources=Fals
                 if not spec or not spec.has_location:
                     continue
 
-                base_dir = find_base_dir(spec)
+                base_dir = find_base_dir(spec, script_path)
                 if not base_dir:
                     print(f"Warning: Couldn't find base path for {module_name}", file=sys.stderr)
                     continue
@@ -201,13 +203,11 @@ def package_with_script(script_path, output_path=None, *, include_resources=Fals
                         if file.endswith('.pyc'):
                             continue
 
-                        file_path = os.path.join(root, file)
-                        arcname = os.path.relpath(file_path, base_dir)
-
-                        # Skip non-.py files unless requested
-                        if not file.endswith('.py') and not include_resources:
+                        if not file.endswith('.py'):
                             continue
 
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, base_dir)
                         add_file_to_zip(zipf, file_path, arcname, processed_files)
 
             except Exception as e:
@@ -228,8 +228,6 @@ def main():
     parser = argparse.ArgumentParser(description='Package Python script with its dependencies')
     parser.add_argument('script', help='Python script to package')
     parser.add_argument('-o', '--output', help='Output path')
-    parser.add_argument('-r', '--resources', action='store_true',
-                       help='Include non-Python files from module directories')
     parser.add_argument('-p', '--packages', action='store_true',
                        help='Include complete packages, not just imported modules')
     parser.add_argument('-f', '--file', action='append', nargs=2,
@@ -246,7 +244,6 @@ def main():
     output_path = package_with_script(
         args.script,
         args.output,
-        include_resources=args.resources,
         include_packages=args.packages,
         extra_files=extra_files
     )
