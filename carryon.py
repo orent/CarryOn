@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Carryon - Pack your Python script with its dependencies
+"""CarryOn - Pack your Python script with its dependencies
 
 # Installation
 

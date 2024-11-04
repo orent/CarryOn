@@ -1,6 +1,6 @@
 [project]
 name = "CarryOn"
-version = "0.1.2"
+version = "0.1.3"
 description = "Pack your Python script with its dependencies"
 authors = [{name = "Oren Tirosh", email = "orent@hishome.net"}]
 license = {text = "MIT License"}
