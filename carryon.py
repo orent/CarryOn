@@ -132,17 +132,6 @@ def find_base_dir(spec, script_path):
             continue
     return None
 
-def get_package_files(dist):
-    """Get resolved paths of all files in a distribution (except .pyc)."""
-    try:
-        base = dist.locate_file('.').resolve()
-        for file in dist.files:
-            if not file.name.endswith('.pyc'):
-                yield dist.locate_file(file).resolve(), base
-    except Exception as e:
-        print(f"Warning: Error processing package {dist.name}: {e}", 
-              file=sys.stderr)
-
 def _build_package_map_metadata():
     """Build package maps using importlib.metadata."""
     from importlib.metadata import distributions
@@ -151,11 +140,21 @@ def _build_package_map_metadata():
     pkg_to_base = {}      # pkg_name -> base_path
     
     for dist in distributions():
-        base = dist.locate_file('.').resolve()
-        pkg_to_base[dist.name] = base
-        for path, _ in get_package_files(dist):
-            file_to_pkg[path] = dist.name
-            pkg_to_files.setdefault(dist.name, set()).add(path)
+        try:
+            base = dist.locate_file('.').resolve()
+            pkg_to_base[dist.name] = base
+            for file in dist.files:
+                if file.name.endswith('.pyc'):
+                    continue
+                try:
+                    path = dist.locate_file(file).resolve()
+                    file_to_pkg[path] = dist.name
+                    pkg_to_files.setdefault(dist.name, set()).add(path)
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"Warning: Error processing package {dist.name}: {e}", 
+                  file=sys.stderr)
             
     return file_to_pkg, pkg_to_files, pkg_to_base
 
@@ -171,19 +170,21 @@ def _build_package_map_resources():
         pkg_to_base[dist.key] = base
         try:
             record = base / f"{dist.egg_info}/RECORD"
-            if record.exists():
-                with open(record) as f:
-                    for line in f:
-                        filename = line.split(',')[0]
-                        if not filename.endswith('.pyc'):
-                            try:
-                                # Verify path is actually under base
-                                path = (base / filename).resolve()
-                                if path.is_file() and base in path.parents:
-                                    file_to_pkg[path] = dist.key
-                                    pkg_to_files.setdefault(dist.key, set()).add(path)
-                            except (ValueError, OSError):
-                                continue
+            if not record.exists():
+                continue
+            with open(record) as f:
+                for line in f:
+                    filename = line.split(',')[0]
+                    if filename.endswith('.pyc'):
+                        continue
+                    try:
+                        path = (base / filename).resolve()
+                        if not base in path.parents:
+                            continue
+                        file_to_pkg[path] = dist.key
+                        pkg_to_files.setdefault(dist.key, set()).add(path)
+                    except (ValueError, OSError):
+                        continue
         except Exception as e:
             print(f"Warning: Error processing package {dist.key}: {e}", 
                   file=sys.stderr)
