@@ -185,11 +185,11 @@ def _build_package_map_resources():
     return file_to_pkg, pkg_to_files, pkg_to_base
 
 try:
-    from importlib.metadata import distributions  # just to test availability
+    from importlib.metadata import distributions
     build_package_map = _build_package_map_metadata
 except ImportError:
     build_package_map = _build_package_map_resources
-            
+
 def add_file_to_zip(zipf, file_path, arcname, processed_files):
     """Add a file to the zip if not already processed."""
     if arcname in processed_files:
@@ -198,34 +198,43 @@ def add_file_to_zip(zipf, file_path, arcname, processed_files):
     zipf.write(file_path, arcname)
     return True
 
-def package_with_script(script_path, output_path=None, *, include_packages=False, 
-                       extra_files=None):
-    """
-    Package dependencies with the script and create self-contained file.
+def extend_file_list(module_paths, include_packages=False):
+    """Get complete list of files to include based on modulefinder results."""
+    if not include_packages:
+        return module_paths
+        
+    file_to_pkg, pkg_to_files, _ = build_package_map()
+    files_to_include = set()
+    processed_packages = set()
+    
+    # For each module found by modulefinder
+    for path in module_paths:
+        if path in file_to_pkg:
+            # Module belongs to a package
+            pkg_name = file_to_pkg[path]
+            if pkg_name not in processed_packages:
+                processed_packages.add(pkg_name)
+                # Add all files from this package
+                files_to_include.update(pkg_to_files[pkg_name])
+        else:
+            # Non-packaged module
+            files_to_include.add(path)
+            
+    return files_to_include
 
-    Args:
-        script_path: Path to the Python script to package
-        output_path: Output path for packaged script (default: script_carryon.py)
-        include_packages: Include all files from packages
-        extra_files: List of (file_path, archive_path) tuples to add to the zip
-    """
-    if output_path is None:
-        output_path = script_path.parent / (script_path.stem + '_carryon' + script_path.suffix)
-
+def create_archive(script_path, files_to_include, extra_files=None):
+    """Create ZIP archive with script and specified files."""
     script_content = get_script_content(script_path)
     
-    # Create zip in memory
+    # Get package info for base path lookup
+    try:
+        file_to_pkg, _, pkg_to_base = build_package_map()
+    except Exception:
+        file_to_pkg = {}
+        pkg_to_base = {}
+        
     zip_buffer = BytesIO()
     processed_files = set()
-    processed_packages = set()
-    package_map = {}
-    
-    if include_packages:
-        try:
-            package_map = build_package_map()
-        except Exception as e:
-            print(f"Error building package map: {e}", file=sys.stderr)
-            sys.exit(1)
     
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
         # Add __main__.py that executes the script portion
@@ -240,63 +249,59 @@ def package_with_script(script_path, output_path=None, *, include_packages=False
                     print(f"Warning: Extra file not found: {file_path}", 
                           file=sys.stderr)
 
-        # Package dependencies
-        modules = get_dependencies(script_path)
-        for module_name in modules:
-            if module_name == '__main__' or is_stdlib_module(module_name):
-                continue
-
+        # Add all files using appropriate base paths
+        for path in files_to_include:
             try:
-                spec = find_spec(module_name)
-            except (ModuleNotFoundError, ValueError) as e:
-                print(f"Warning: Module not found {module_name}: {e}", file=sys.stderr)
-                continue
+                # Try package base path first
+                if path in file_to_pkg:
+                    pkg_name = file_to_pkg[path]
+                    base = pkg_to_base[pkg_name]
+                else:
+                    # Fall back to sys.path search
+                    spec = find_spec(path.stem)
+                    if not spec:
+                        continue
+                    base = find_base_dir(spec, script_path)
+                    if not base:
+                        continue
+                
+                arcname = path.relative_to(base)
+                add_file_to_zip(zipf, path, arcname, processed_files)
             except Exception as e:
-                print(f"Warning: Error finding module {module_name}: {e}", file=sys.stderr)
-                continue
+                print(f"Warning: Error adding file {path}: {e}", file=sys.stderr)
+                
+    return script_content + b'\n\n# === Bundled dependencies follow this line ===\n' + zip_buffer.getvalue()
 
+def package_with_script(script_path, output_path=None, *, include_packages=False, 
+                       extra_files=None):
+    """Package script with its dependencies into a self-contained file."""
+    if output_path is None:
+        output_path = script_path.parent / (script_path.stem + '_carryon' + script_path.suffix)
+
+    # Get list of module paths from modulefinder
+    modules = get_dependencies(script_path)
+    module_paths = set()
+    for module_name in modules:
+        if module_name == '__main__' or is_stdlib_module(module_name):
+            continue
+        try:
+            spec = find_spec(module_name)
             if not spec or not spec.has_location:
                 continue
-
-            try:
-                module_path = Path(spec.origin).resolve()
-            except Exception as e:
-                print(f"Warning: Error resolving path for {module_name}: {e}", file=sys.stderr)
-                continue
-                
-            if include_packages and module_path in package_map:
-                # Module belongs to a package
-                try:
-                    dist, package_base = package_map[module_path]
-                    if dist.name not in processed_packages:
-                        processed_packages.add(dist.name)
-                        # Add all files from this package relative to package base
-                        for path, _ in get_package_files(dist):
-                            try:
-                                arcname = path.relative_to(package_base)
-                                add_file_to_zip(zipf, path, arcname, processed_files)
-                            except Exception as e:
-                                print(f"Warning: Error adding package file {path}: {e}", 
-                                      file=sys.stderr)
-                except Exception as e:
-                    print(f"Warning: Error packaging files for {dist.name}: {e}", 
-                          file=sys.stderr)
-            else:
-                # Non-packaged module
-                try:
-                    base_dir = find_base_dir(spec, script_path)
-                    if base_dir:
-                        arcname = module_path.relative_to(base_dir)
-                        add_file_to_zip(zipf, module_path, arcname, processed_files)
-                except Exception as e:
-                    print(f"Warning: Error adding module {module_name}: {e}", file=sys.stderr)
-
-    # Create the final packaged script
-    output_path.write_bytes(script_content + 
-                           b'\n\n# === Bundled dependencies follow this line ===\n' + 
-                           zip_buffer.getvalue())
-
-    # Make executable (rwxr-xr-x)
+            module_paths.add(Path(spec.origin).resolve())
+        except (ModuleNotFoundError, ValueError) as e:
+            print(f"Warning: Module not found {module_name}: {e}", file=sys.stderr)
+        except Exception as e:
+            print(f"Warning: Error finding module {module_name}: {e}", file=sys.stderr)
+    
+    # Get complete list of files to include
+    files_to_include = extend_file_list(module_paths, include_packages)
+    
+    # Create the archive
+    archive_content = create_archive(script_path, files_to_include, extra_files)
+    
+    # Write output file
+    output_path.write_bytes(archive_content)
     output_path.chmod(0o755)
     return output_path
 
