@@ -1,12 +1,10 @@
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "carryon"
-version = "0.1.0"
+name = "CarryOn"
+version = "0.1.2"
 description = "Pack your Python script with its dependencies"
 authors = [{name = "Oren Tirosh", email = "orent@hishome.net"}]
+license = {text = "MIT License"}
+readme = {file="README.md", content-type = "text/markdown"}
 requires-python = ">=3.6"
 classifiers = [
     "Development Status :: 4 - Beta",
