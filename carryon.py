@@ -108,8 +108,7 @@ def get_script_content(script_path):
     try:
         # Try to open it as a zip file first
         with zipfile.ZipFile(script_path, 'r') as zf:
-            # Get the minimum offset - same method used in __main__.py
-            size = min(f[4] for f in zf.filelist)
+            size = z.filelist[0].header_offset
     except zipfile.BadZipFile:
         size = 999999999
 
