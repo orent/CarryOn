@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=50"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "CarryOn"
-version = "0.1.0"
+version = "0.1.1"
 description = "Pack your Python script with its dependencies"
 authors = [{name = "Oren Tirosh", email = "orent@hishome.net"}]
 requires-python = ">=3.6"
