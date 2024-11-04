@@ -64,6 +64,7 @@ SOFTWARE.
 import modulefinder
 import sys
 import os
+import time
 import zipfile
 import codecs
 from importlib.util import find_spec
@@ -232,6 +233,7 @@ def extend_file_list(module_paths, include_packages=False):
 def create_archive(script_path, files_to_include, extra_files=None):
     """Create ZIP archive with script and specified files."""
     script_content = get_script_content(script_path)
+    script_time = script_path.stat().st_mtime
     
     # Get package info for base path lookup
     try:
@@ -245,7 +247,10 @@ def create_archive(script_path, files_to_include, extra_files=None):
     
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
         # Add __main__.py that executes the script portion
-        zipf.writestr('__main__.py', BOOTSTRAP_CODE)
+        info = zipfile.ZipInfo('__main__.py')
+        info.date_time = time.localtime(script_time)[:6]
+        info.compress_type = zipfile.ZIP_DEFLATED
+        zipf.writestr(info, BOOTSTRAP_CODE)
 
         # Add any extra files first
         if extra_files:
