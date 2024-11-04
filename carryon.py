@@ -63,6 +63,7 @@ SOFTWARE.
 """
 import modulefinder
 import sys
+import os
 import zipfile
 import codecs
 from importlib.util import find_spec
@@ -175,9 +176,14 @@ def _build_package_map_resources():
                     for line in f:
                         filename = line.split(',')[0]
                         if not filename.endswith('.pyc'):
-                            path = base / filename
-                            file_to_pkg[path] = dist.key
-                            pkg_to_files.setdefault(dist.key, set()).add(path)
+                            try:
+                                # Verify path is actually under base
+                                path = (base / filename).resolve()
+                                if path.is_file() and base in path.parents:
+                                    file_to_pkg[path] = dist.key
+                                    pkg_to_files.setdefault(dist.key, set()).add(path)
+                            except (ValueError, OSError):
+                                continue
         except Exception as e:
             print(f"Warning: Error processing package {dist.key}: {e}", 
                   file=sys.stderr)
