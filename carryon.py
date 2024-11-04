@@ -93,13 +93,13 @@ def get_dependencies(script_path):
 def is_stdlib_module(module_name):
     """Check if a module is part of the Python standard library."""
     try:
-        spec = find_spec(module_name)
-    except (ImportError, AttributeError, ValueError):
-        return False
+        spec = find_spec(module_name.partition('.')[0])
+        if spec is None or not spec.has_location:  # Built-in or frozen modules
+            return True
 
-    if spec is None or not spec.has_location:  # Built-in or frozen modules
-        return True
-    return Path(spec.origin).resolve().is_relative_to(STDLIB_PATH)
+        return Path(spec.origin).resolve().is_relative_to(STDLIB_PATH)
+    except (ImportError, AttributeError):
+        return False
 
 def get_script_content(script_path):
     """Read script content and truncate any existing ZIP."""
@@ -183,7 +183,8 @@ def package_with_script(script_path, output_path=None, *, include_packages=False
         try:
             package_map = build_package_map()
         except Exception as e:
-            print(f"Warning: Error building package map: {e}", file=sys.stderr)
+            print(f"Error building package map: {e}", file=sys.stderr)
+            sys.exit(1)
     
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
         # Add __main__.py that executes the script portion
@@ -209,7 +210,7 @@ def package_with_script(script_path, output_path=None, *, include_packages=False
 
             try:
                 spec = find_spec(module_name)
-            except ModuleNotFoundError as e:
+            except (ModuleNotFoundError, ValueError) as e:
                 print(f"Warning: Module not found {module_name}: {e}", file=sys.stderr)
                 continue
             except Exception as e:
@@ -228,8 +229,21 @@ def package_with_script(script_path, output_path=None, *, include_packages=False
                 continue
                 
             if include_packages and module_path in package_map:
-                # Package mode handling...
-                pass
+                # Module belongs to a package
+                try:
+                    dist, package_base = package_map[module_path]
+                    if dist.name not in processed_packages:
+                        processed_packages.add(dist.name)
+                        # Add all files from this package relative to package base
+                        for path, _ in get_package_files(dist):
+                            try:
+                                arcname = path.relative_to(package_base)
+                                print(f"Adding package file: {path} as {arcname}", file=sys.stderr)
+                                add_file_to_zip(zipf, path, arcname, processed_files)
+                            except Exception as e:
+                                print(f"Warning: Error adding package file {path}: {e}", file=sys.stderr)
+                except Exception as e:
+                    print(f"Warning: Error packaging files for {dist.name}: {e}", file=sys.stderr)
             else:
                 # Non-packaged module
                 try:
