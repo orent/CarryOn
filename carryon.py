@@ -101,13 +101,13 @@ def get_script_content(script_path):
 def find_base_dir(spec, script_path):
     """Find which sys.path entry a module is under."""
     module_path = Path(spec.origin).resolve()
-    
+
     for path in sys.path:
         if path == '':
             path = script_path.parent
         else:
             path = Path(path).resolve()
-            
+
         try:
             module_path.relative_to(path)
             return path
@@ -121,7 +121,7 @@ def _build_package_map_metadata():
     file_to_pkg = {}      # Path -> pkg_name
     pkg_to_files = {}     # pkg_name -> set(Path)
     pkg_to_base = {}      # pkg_name -> base_path
-    
+
     for dist in distributions():
         try:
             base = dist.locate_file('.').resolve()
@@ -136,9 +136,9 @@ def _build_package_map_metadata():
                 except Exception:
                     continue
         except Exception as e:
-            print(f"Warning: Error processing package {dist.name}: {e}", 
+            print(f"Warning: Error processing package {dist.name}: {e}",
                   file=sys.stderr)
-            
+
     return file_to_pkg, pkg_to_files, pkg_to_base
 
 def _build_package_map_resources():
@@ -147,7 +147,7 @@ def _build_package_map_resources():
     file_to_pkg = {}
     pkg_to_files = {}
     pkg_to_base = {}
-    
+
     for dist in pkg_resources.working_set:
         base = Path(dist.location)
         pkg_to_base[dist.key] = base
@@ -169,9 +169,9 @@ def _build_package_map_resources():
                     except (ValueError, OSError):
                         continue
         except Exception as e:
-            print(f"Warning: Error processing package {dist.key}: {e}", 
+            print(f"Warning: Error processing package {dist.key}: {e}",
                   file=sys.stderr)
-        
+
     return file_to_pkg, pkg_to_files, pkg_to_base
 
 try:
@@ -192,11 +192,11 @@ def extend_file_list(module_paths, include_packages=False):
     """Get complete list of files to include based on modulefinder results."""
     if not include_packages:
         return module_paths
-        
+
     file_to_pkg, pkg_to_files, _ = build_package_map()
     files_to_include = set()
     processed_packages = set()
-    
+
     # For each module found by modulefinder
     for path in module_paths:
         if path in file_to_pkg:
@@ -209,24 +209,24 @@ def extend_file_list(module_paths, include_packages=False):
         else:
             # Non-packaged module
             files_to_include.add(path)
-            
+
     return files_to_include
 
 def create_archive(script_path, files_to_include, extra_files=None):
     """Create ZIP archive with script and specified files."""
     script_content = get_script_content(script_path)
     script_time = script_path.stat().st_mtime
-    
+
     # Get package info for base path lookup
     try:
         file_to_pkg, _, pkg_to_base = build_package_map()
     except Exception:
         file_to_pkg = {}
         pkg_to_base = {}
-        
+
     zip_buffer = BytesIO()
     processed_files = set()
-    
+
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
         # Add __main__.py that executes the script portion
         info = zipfile.ZipInfo('__main__.py')
@@ -240,7 +240,7 @@ def create_archive(script_path, files_to_include, extra_files=None):
                 if file_path.exists():
                     add_file_to_zip(zipf, file_path, arc_path, processed_files)
                 else:
-                    print(f"Warning: Extra file not found: {file_path}", 
+                    print(f"Warning: Extra file not found: {file_path}",
                           file=sys.stderr)
 
         # Add all files using appropriate base paths
@@ -258,15 +258,15 @@ def create_archive(script_path, files_to_include, extra_files=None):
                     base = find_base_dir(spec, script_path)
                     if not base:
                         continue
-                
+
                 arcname = path.relative_to(base)
                 add_file_to_zip(zipf, path, arcname, processed_files)
             except Exception as e:
                 print(f"Warning: Error adding file {path}: {e}", file=sys.stderr)
-                
+
     return script_content + b'\n\n# === Bundled dependencies follow this line ===\n' + zip_buffer.getvalue()
 
-def package_with_script(script_path, output_path=None, *, include_packages=False, 
+def package_with_script(script_path, output_path=None, *, include_packages=False,
                        extra_files=None):
     """Package script with its dependencies into a self-contained file."""
     if output_path is None:
@@ -287,13 +287,13 @@ def package_with_script(script_path, output_path=None, *, include_packages=False
             print(f"Warning: Module not found {module_name}: {e}", file=sys.stderr)
         except Exception as e:
             print(f"Warning: Error finding module {module_name}: {e}", file=sys.stderr)
-    
+
     # Get complete list of files to include
     files_to_include = extend_file_list(module_paths, include_packages)
-    
+
     # Create the archive
     archive_content = create_archive(script_path, files_to_include, extra_files)
-    
+
     # Write output file
     output_path.write_bytes(archive_content)
     output_path.chmod(0o755)
