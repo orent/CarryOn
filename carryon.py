@@ -28,7 +28,10 @@ def find_module_dependencies(script_path):
     sys_paths = [script_path.parent if p == '' else Path(p) for p in sys.path]
 
     # Get stdlib paths
-    stdlib_paths = {Path(sysconfig.get_path(n)) for n in ('stdlib', 'platstdlib')}
+    stdlib_paths = {
+        Path(sysconfig.get_path('stdlib')),
+        Path(sysconfig.get_path('platstdlib')) / 'lib-dynload'
+    }
 
     def find_base(module):
         if not module.__file__:
