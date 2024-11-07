@@ -177,7 +177,8 @@ def unpack(script_path, output_dir=None):
     
     data = script_path.read_bytes()
     with ZipFile(io.BytesIO(data)) as zf:
-        zf.extractall(output_dir)
+        members = [f for f in zf.filelist if f.filename != '__main__.py']
+        zf.extractall(output_dir, members)
 
 def repack(script_path, output_path=None):
     """Generate zip from unpacked directory"""
