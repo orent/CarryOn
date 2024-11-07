@@ -106,9 +106,9 @@ def create_zip_archive(file_deps):
         main.date_time = datetime(2000, 1, 1).timetuple()[:6]
         zf.writestr(main, BOOTSTRAP_CODE)
         
-        # Convert to list and sort by relative path
-        entries = sorted(file_deps, key=lambda x: str(x[1]))
-        for base, relpath in entries:
+        # Create sorted list of (relpath, base) pairs
+        entries = [(relpath, base) for base, relpath in file_deps]
+        for relpath, base in sorted(entries):
             fullpath = base / relpath
             info = ZipInfo.from_file(fullpath, str(relpath))
             zf.writestr(info, fullpath.read_bytes())
