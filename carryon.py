@@ -31,6 +31,8 @@ def find_module_dependencies(script_path):
         if not module.__file__:
             return None
         modpath = Path(module.__file__)
+        if modpath.resolve() == script_path:  # Skip the script itself
+            return None
         for base in sys_paths:
             try:
                 return base, modpath.relative_to(base)
@@ -126,7 +128,7 @@ def find_script_size(path):
     with open(path, 'rb') as f:
         data = f.read()
     with ZipFile(io.BytesIO(data)) as zf:
-        return zf.start_dir
+        return zf.filelist[0].header_offset
 
 def pack(script_path, output_path=None):
     """Generate and append zip to script"""
