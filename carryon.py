@@ -110,10 +110,8 @@ def create_zip_archive(file_deps):
         entries = sorted(file_deps, key=lambda x: str(x[1]))
         for base, relpath in entries:
             fullpath = base / relpath
-            if fullpath.exists():
-                info = ZipInfo.from_file(fullpath, str(relpath))
-                with open(fullpath, 'rb') as f:
-                    zf.writestr(info, f.read())
+            info = ZipInfo.from_file(fullpath, str(relpath))
+            zf.writestr(info, fullpath.read_bytes())
     return buffer
 
 def collect_from_directory(dirpath):
@@ -125,8 +123,7 @@ def collect_from_directory(dirpath):
 
 def find_script_size(path):
     """Find size of script without appended zip"""
-    with open(path, 'rb') as f:
-        data = f.read()
+    data = path.read_bytes()
     with ZipFile(io.BytesIO(data)) as zf:
         return zf.filelist[0].header_offset
 
@@ -143,7 +140,8 @@ def pack(script_path, output_path=None):
     
     # Create temporary file
     temp_path = output_path.with_suffix('.CarryOn.tmp')
-    temp_path.write_bytes(script_path.read_bytes() + zip_buffer.getvalue())
+    data = script_path.read_bytes()
+    temp_path.write_bytes(data + zip_buffer.getvalue())
     
     # Copy metadata and replace target
     shutil.copystat(script_path, temp_path)
@@ -157,10 +155,10 @@ def strip(script_path, output_path=None):
     # Get size of original script before zip
     size = find_script_size(script_path)
 
-    # Create temporary file in same directory
-    temp_path = output_path.with_suffix('.tmp')
-    with open(script_path, 'rb') as src, open(temp_path, 'wb') as dst:
-        dst.write(src.read(size))
+    # Create temporary file
+    temp_path = output_path.with_suffix('.CarryOn.tmp')
+    data = script_path.read_bytes()[:size]
+    temp_path.write_bytes(data)
     
     # Copy metadata and replace target
     shutil.copystat(script_path, temp_path)
@@ -177,34 +175,27 @@ def unpack(script_path, output_dir=None):
     if output_dir.exists():
         print(f"Note: Output directory {output_dir} already exists and may be removed.")
     
-    size = find_script_size(script_path)
-    with open(script_path, 'rb') as f:
-        f.seek(size)
-        zip_data = io.BytesIO(f.read())
-        with ZipFile(zip_data) as zf:
-            zf.extractall(output_dir)
-        
-def repack(script_path, dir_path=None, output_path=None):
+    data = script_path.read_bytes()
+    with ZipFile(io.BytesIO(data)) as zf:
+        zf.extractall(output_dir)
+
+def repack(script_path, output_path=None):
     """Generate zip from unpacked directory"""
     script_path = Path(script_path)
     output_path = output_path or script_path
-    if dir_path is None:
-        dir_path = script_path.with_suffix('.d')
+    dir_path = script_path.with_suffix('.d')
     
     # Get size of original script before zip
     size = find_script_size(script_path)
+    data = script_path.read_bytes()
 
     # Create zip from directory contents
     file_deps = collect_from_directory(dir_path)
     zip_buffer = create_zip_archive(file_deps)
 
     # Create temporary file
-    temp_path = output_path.with_suffix('.tmp')
-    with open(script_path, 'rb') as src:
-        script_content = src.read(size)
-        with open(temp_path, 'wb') as dst:
-            dst.write(script_content)
-            dst.write(zip_buffer.getvalue())
+    temp_path = output_path.with_suffix('.CarryOn.tmp')
+    temp_path.write_bytes(data[:size] + zip_buffer.getvalue())
     
     # Copy metadata and replace target
     shutil.copystat(script_path, temp_path)
@@ -225,7 +216,7 @@ def main():
     elif args.command == 'unpack':
         unpack(args.script, args.output)
     elif args.command == 'repack':
-        repack(args.script, output_path=args.output)
+        repack(args.script, args.output)
 
 if __name__ == '__main__':
     main()
