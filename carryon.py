@@ -1,335 +1,235 @@
 #!/usr/bin/env python3
-"""CarryOn - Pack your Python script with its dependencies
-
-# Installation
-
-```bash
-pip install carryon
-```
-
-Or better, since this is a command-line tool:
-```bash
-pipx install carryon
-```
-
-# Usage
-
-```bash
-carryon script.py
-```
-
-This creates a self-contained executable that includes all non-stdlib dependencies.
-
-Options:
-- `-o, --output` - Specify output file
-- `-p, --packages` - Include complete packages
-- `-f, --file FILE ARCNAME` - Add extra files to the bundle
-
-# How it works
-
-Carryon appends a ZIP archive with all dependencies to your script, making it
-self-contained while still being a valid Python script.
-
-Not a heavyweight solution like PyInstaller and other "checked luggage" tools.
-It still requires a python interpreter.
-
-The script portion can still be edited after packaging - just ensure your editor
-preserves binary data and doesn't add a newline at EOF. For vim, use:
-    vim -b script_packaged.py   # binary mode
-
-# License
-
-Copyright (c) 2024 Oren Tirosh
-Released under the terms of the MIT license
-https://opensource.org/license/mit
-
-"""
-import modulefinder
 import sys
+import io
 import os
-import time
-import zipfile
+import argparse
 import codecs
-from importlib.util import find_spec
+from zipfile import ZipFile, ZipInfo
+from modulefinder import ModuleFinder
 from pathlib import Path
-from io import BytesIO
-
-# Get stdlib base path using a known stdlib module
-STDLIB_PATH = Path(codecs.__file__).resolve().parent
+from importlib.metadata import distributions
+from datetime import datetime
 
 # Bootstrap code that will be saved as __main__.py in the zip
 BOOTSTRAP_CODE = b"""exec(compile(
     # The zip from which __main__ was loaded:
     open(__loader__.archive, 'rb').read(
         # minimum offset = size of file before zip start:
-        min(f[4] for f in
-            (
-                __loader__._files
-                if hasattr(__loader__, '_files') else
-                __loader._get_files()
-            ).values()
-        )
+        min(f[4] for f in getattr(__loader__, '_get_files', lambda: __loader__._files)().values())
     ).decode('utf8', 'surrogateescape'),
     __loader__.archive,     # set filename in code object
     'exec'                  # compile in 'exec' mode
 ))"""
 
-def get_dependencies(script_path):
-    """Find all dependencies of a Python script."""
-    finder = modulefinder.ModuleFinder()
-    finder.run_script(str(script_path))
-    return finder.modules.keys()
+MAIN_TIME = datetime(2000, 1, 1).timestamp()
 
-def is_stdlib_module(module_name):
-    """Check if a module is part of the Python standard library."""
-    try:
-        spec = find_spec(module_name)
-        if spec is None or not spec.has_location:  # Built-in or frozen modules
-            return True
+def find_module_dependencies(script_path):
+    # Convert script path to absolute and sys.path to Path objects
+    script_path = Path(script_path).resolve()
+    sys_paths = [script_path.parent if p == '' else Path(p) for p in sys.path]
 
-        stdlib_path = str(STDLIB_PATH)
-        return str(Path(spec.origin).resolve()).startswith(stdlib_path)
-    except (ImportError, AttributeError, ValueError):
-        return False
-
-def get_script_content(script_path):
-    """Read script content and truncate any existing ZIP."""
-    try:
-        # Try to open it as a zip file first
-        with zipfile.ZipFile(script_path, 'r') as zf:
-            size = z.filelist[0].header_offset
-    except zipfile.BadZipFile:
-        size = 999999999
-
-    with open(script_path, 'rb') as f:
-        return f.read(size)
-
-def find_base_dir(spec, script_path):
-    """Find which sys.path entry a module is under."""
-    module_path = Path(spec.origin).resolve()
-
-    for path in sys.path:
-        if path == '':
-            path = script_path.parent
-        else:
-            path = Path(path).resolve()
-
-        try:
-            module_path.relative_to(path)
-            return path
-        except ValueError:
-            continue
-    return None
-
-def _build_package_map_metadata():
-    """Build package maps using importlib.metadata."""
-    from importlib.metadata import distributions
-    file_to_pkg = {}      # Path -> pkg_name
-    pkg_to_files = {}     # pkg_name -> set(Path)
-    pkg_to_base = {}      # pkg_name -> base_path
-
-    for dist in distributions():
-        try:
-            base = dist.locate_file('.').resolve()
-            pkg_to_base[dist.name] = base
-            for file in dist.files:
-                if file.name.endswith('.pyc'):
-                    continue
-                try:
-                    path = dist.locate_file(file).resolve()
-                    file_to_pkg[path] = dist.name
-                    pkg_to_files.setdefault(dist.name, set()).add(path)
-                except Exception:
-                    continue
-        except Exception as e:
-            print(f"Warning: Error processing package {dist.name}: {e}",
-                  file=sys.stderr)
-
-    return file_to_pkg, pkg_to_files, pkg_to_base
-
-def _build_package_map_resources():
-    """Build package maps using pkg_resources."""
-    import pip._vendor.pkg_resources as pkg_resources
-    file_to_pkg = {}
-    pkg_to_files = {}
-    pkg_to_base = {}
-
-    for dist in pkg_resources.working_set:
-        base = Path(dist.location)
-        pkg_to_base[dist.key] = base
-        try:
-            record = base / f"{dist.egg_info}/RECORD"
-            if not record.exists():
-                continue
-            with open(record) as f:
-                for line in f:
-                    filename = line.split(',')[0]
-                    if filename.endswith('.pyc'):
-                        continue
-                    try:
-                        path = (base / filename).resolve()
-                        if not base in path.parents:
-                            continue
-                        file_to_pkg[path] = dist.key
-                        pkg_to_files.setdefault(dist.key, set()).add(path)
-                    except (ValueError, OSError):
-                        continue
-        except Exception as e:
-            print(f"Warning: Error processing package {dist.key}: {e}",
-                  file=sys.stderr)
-
-    return file_to_pkg, pkg_to_files, pkg_to_base
-
-try:
-    from importlib.metadata import distributions
-    build_package_map = _build_package_map_metadata
-except ImportError:
-    build_package_map = _build_package_map_resources
-
-def add_file_to_zip(zipf, file_path, arcname, processed_files):
-    """Add a file to the zip if not already processed."""
-    if arcname in processed_files:
-        return False
-    processed_files.add(arcname)
-    zipf.write(file_path, arcname)
-    return True
-
-def extend_file_list(module_paths, include_packages=False):
-    """Get complete list of files to include based on modulefinder results."""
-    if not include_packages:
-        return module_paths
-
-    file_to_pkg, pkg_to_files, _ = build_package_map()
-    files_to_include = set()
-    processed_packages = set()
-
-    # For each module found by modulefinder
-    for path in module_paths:
-        if path in file_to_pkg:
-            # Module belongs to a package
-            pkg_name = file_to_pkg[path]
-            if pkg_name not in processed_packages:
-                processed_packages.add(pkg_name)
-                # Add all files from this package
-                files_to_include.update(pkg_to_files[pkg_name])
-        else:
-            # Non-packaged module
-            files_to_include.add(path)
-
-    return files_to_include
-
-def create_archive(script_path, files_to_include, extra_files=None):
-    """Create ZIP archive with script and specified files."""
-    script_content = get_script_content(script_path)
-    script_time = script_path.stat().st_mtime
-
-    # Get package info for base path lookup
-    try:
-        file_to_pkg, _, pkg_to_base = build_package_map()
-    except Exception:
-        file_to_pkg = {}
-        pkg_to_base = {}
-
-    zip_buffer = BytesIO()
-    processed_files = set()
-
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        # Add __main__.py that executes the script portion
-        info = zipfile.ZipInfo('__main__.py')
-        info.date_time = time.localtime(script_time)[:6]
-        info.compress_type = zipfile.ZIP_DEFLATED
-        zipf.writestr(info, BOOTSTRAP_CODE)
-
-        # Add any extra files first
-        if extra_files:
-            for file_path, arc_path in extra_files:
-                if file_path.exists():
-                    add_file_to_zip(zipf, file_path, arc_path, processed_files)
-                else:
-                    print(f"Warning: Extra file not found: {file_path}",
-                          file=sys.stderr)
-
-        # Add all files using appropriate base paths
-        for path in files_to_include:
+    def find_base(module):
+        if not module.__file__:
+            return None
+        modpath = Path(module.__file__)
+        for base in sys_paths:
             try:
-                # Try package base path first
-                if path in file_to_pkg:
-                    pkg_name = file_to_pkg[path]
-                    base = pkg_to_base[pkg_name]
-                else:
-                    # Fall back to sys.path search
-                    spec = find_spec(path.stem)
-                    if not spec:
-                        continue
-                    base = find_base_dir(spec, script_path)
-                    if not base:
-                        continue
-
-                arcname = path.relative_to(base)
-                add_file_to_zip(zipf, path, arcname, processed_files)
-            except Exception as e:
-                print(f"Warning: Error adding file {path}: {e}", file=sys.stderr)
-
-    return script_content + b'\n\n# === Bundled dependencies follow this line ===\n' + zip_buffer.getvalue()
-
-def package_with_script(script_path, output_path=None, *, include_packages=False,
-                       extra_files=None):
-    """Package script with its dependencies into a self-contained file."""
-    if output_path is None:
-        output_path = script_path.parent / (script_path.stem + '_carryon' + script_path.suffix)
-
-    # Get list of module paths from modulefinder
-    modules = get_dependencies(script_path)
-    module_paths = set()
-    for module_name in modules:
-        if module_name == '__main__' or is_stdlib_module(module_name):
-            continue
-        try:
-            spec = find_spec(module_name)
-            if not spec or not spec.has_location:
+                return base, modpath.relative_to(base)
+            except ValueError:
                 continue
-            module_paths.add(Path(spec.origin).resolve())
-        except (ModuleNotFoundError, ValueError) as e:
-            print(f"Warning: Module not found {module_name}: {e}", file=sys.stderr)
-        except Exception as e:
-            print(f"Warning: Error finding module {module_name}: {e}", file=sys.stderr)
+        return None
 
-    # Get complete list of files to include
-    files_to_include = extend_file_list(module_paths, include_packages)
+    # Find stdlib path using codecs module
+    stdlib_base, _ = find_base(codecs)
 
-    # Create the archive
-    archive_content = create_archive(script_path, files_to_include, extra_files)
+    # Run modulefinder on target script
+    finder = ModuleFinder()
+    finder.run_script(str(script_path))
 
-    # Write output file
-    output_path.write_bytes(archive_content)
-    output_path.chmod(0o755)
-    return output_path
+    # Yield non-stdlib dependencies
+    for module in finder.modules.values():
+        result = find_base(module)
+        if not result:
+            continue
+        if result[0] == stdlib_base:
+            continue
+        yield result
+
+def resolve_to_distributions(module_deps):
+    # Build map of absolute file paths to distributions
+    path_map = {}
+    for dist in distributions():
+        if not dist.files:
+            continue
+        base = Path(dist.locate_file(''))
+        for f in dist.files:
+            path_map[str(base / f)] = dist
+
+    seen = set()
+    for base, relpath in module_deps:
+        fullpath = str(base / relpath)
+        if fullpath not in path_map:
+            yield base, relpath
+            continue
+        dist = path_map[fullpath]
+        if dist in seen:
+            continue
+        seen.add(dist)
+        yield base, dist
+
+def expand_distributions(mixed_deps, exclude_pyc=True):
+    for base, item in mixed_deps:
+        # Pass through non-distribution items
+        if not hasattr(item, 'files'):
+            yield base, item
+            continue
+            
+        # Expand distribution files
+        base = Path(item.locate_file(''))
+        for file in item.files:
+            # Skip .pyc files if requested
+            if exclude_pyc and file.name.endswith('.pyc'):
+                continue
+            # Skip files that try to escape package directory
+            try:
+                base.joinpath(file).relative_to(base)
+            except ValueError:
+                continue
+            yield base, Path(file)
+
+def create_zip_archive(file_deps):
+    buffer = io.BytesIO()
+    with ZipFile(buffer, 'w') as zf:
+        # Add bootstrap code as __main__.py with fixed timestamp
+        main = ZipInfo('__main__.py')
+        main.date_time = datetime(2000, 1, 1).timetuple()[:6]
+        zf.writestr(main, BOOTSTRAP_CODE)
+        
+        # Convert to list and sort by relative path
+        entries = sorted(file_deps, key=lambda x: str(x[1]))
+        for base, relpath in entries:
+            fullpath = base / relpath
+            if fullpath.exists():
+                info = ZipInfo.from_file(fullpath, str(relpath))
+                with open(fullpath, 'rb') as f:
+                    zf.writestr(info, f.read())
+    return buffer
+
+def collect_from_directory(dirpath):
+    """Generate base, relpath pairs from an unpacked directory"""
+    base = Path(dirpath)
+    for path in sorted(base.rglob('*')):
+        if path.is_file():
+            yield base, path.relative_to(base)
+
+def find_script_size(path):
+    """Find size of script without appended zip"""
+    with open(path, 'rb') as f:
+        data = f.read()
+    with ZipFile(io.BytesIO(data)) as zf:
+        return zf.start_dir
+
+def pack(script_path, output_path=None):
+    """Generate and append zip to script"""
+    script_path = Path(script_path)
+    output_path = output_path or script_path
+    
+    # Get original script timestamp and content
+    orig_time = script_path.stat().st_mtime
+    with open(script_path, 'rb') as f:
+        script_content = f.read()
+
+    # Create zip of dependencies
+    deps = find_module_dependencies(script_path)
+    mixed_deps = resolve_to_distributions(deps)
+    file_deps = expand_distributions(mixed_deps)
+    zip_buffer = create_zip_archive(file_deps)
+    
+    # Write combined file
+    with open(output_path, 'wb') as f:
+        f.write(script_content)
+        f.write(zip_buffer.getvalue())
+    
+    # Restore timestamp
+    os.utime(output_path, (orig_time, orig_time))
+
+def strip(script_path, output_path=None):
+    """Remove zip from file"""
+    script_path = Path(script_path)
+    output_path = output_path or script_path
+    
+    # Get original timestamp
+    orig_time = script_path.stat().st_mtime
+    
+    if output_path != script_path:
+        # Copy file first if output path different
+        shutil.copy2(script_path, output_path)
+    
+    # Truncate to remove zip portion
+    size = find_script_size(output_path)
+    with open(output_path, 'r+b') as f:
+        f.truncate(size)
+        
+    # Restore timestamp
+    os.utime(output_path, (orig_time, orig_time))
+
+def unpack(script_path, output_dir=None):
+    """Extract zip to directory"""
+    script_path = Path(script_path)
+    if output_dir is None:
+        output_dir = script_path.with_suffix('.d')
+    else:
+        output_dir = Path(output_dir)
+    
+    size = find_script_size(script_path)
+    with open(script_path, 'rb') as f:
+        data = f.read()
+        zip_data = io.BytesIO(data[size:])
+        with ZipFile(zip_data) as zf:
+            zf.extractall(output_dir)
+        
+def repack(script_path, dir_path=None, output_path=None):
+    """Generate zip from unpacked directory"""
+    script_path = Path(script_path)
+    output_path = output_path or script_path
+    if dir_path is None:
+        dir_path = script_path.with_suffix('.d')
+    
+    # Get original script timestamp and content
+    orig_time = script_path.stat().st_mtime
+    size = find_script_size(script_path)
+    with open(script_path, 'rb') as f:
+        orig_script = f.read(size)
+    
+    # Create zip from directory contents
+    file_deps = collect_from_directory(dir_path)
+    zip_buffer = create_zip_archive(file_deps)
+    
+    # Write combined file
+    with open(output_path, 'wb') as f:
+        f.write(orig_script)
+        f.write(zip_buffer.getvalue())
+    
+    # Restore timestamp
+    os.utime(output_path, (orig_time, orig_time))
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description='Package Python script with its dependencies')
-    parser.add_argument('script', type=Path, help='Python script to package')
-    parser.add_argument('-o', '--output', type=Path, help='Output path')
-    parser.add_argument('-p', '--packages', action='store_true',
-                       help='Include complete packages, not just imported modules')
-    parser.add_argument('-f', '--file', action='append', nargs=2,
-                       metavar=('FILE', 'ARCNAME'), type=Path,
-                       help='Add extra file to zip with given archive path')
-
+    parser = argparse.ArgumentParser(description="CarryOn - Pack Python dependencies with scripts")
+    parser.add_argument('command', choices=['pack', 'strip', 'unpack', 'repack'])
+    parser.add_argument('script', help='Python script to process')
+    parser.add_argument('-o', '--output', help='Output file/directory')
+    parser.add_argument('-d', '--dir', help='Directory for repack')
+    
     args = parser.parse_args()
-
-    if not args.script.exists():
-        print(f"Error: Script '{args.script}' not found.", file=sys.stderr)
-        sys.exit(1)
-
-    extra_files = args.file if args.file else None
-    output_path = package_with_script(
-        args.script,
-        args.output,
-        include_packages=args.packages,
-        extra_files=extra_files
-    )
-    print(f"Created self-contained script: {output_path}")
+    
+    if args.command == 'pack':
+        pack(args.script, args.output)
+    elif args.command == 'strip':
+        strip(args.script, args.output)
+    elif args.command == 'unpack':
+        unpack(args.script, args.output)
+    elif args.command == 'repack':
+        repack(args.script, args.dir, args.output)
 
 if __name__ == '__main__':
     main()
