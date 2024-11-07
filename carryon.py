@@ -4,6 +4,7 @@ import io
 import os
 import argparse
 import codecs
+import shutil
 from zipfile import ZipFile, ZipInfo
 from modulefinder import ModuleFinder
 from pathlib import Path
@@ -20,8 +21,6 @@ BOOTSTRAP_CODE = b"""exec(compile(
     __loader__.archive,     # set filename in code object
     'exec'                  # compile in 'exec' mode
 ))"""
-
-MAIN_TIME = datetime(2000, 1, 1).timestamp()
 
 def find_module_dependencies(script_path):
     # Convert script path to absolute and sys.path to Path objects
@@ -133,11 +132,6 @@ def pack(script_path, output_path=None):
     """Generate and append zip to script"""
     script_path = Path(script_path)
     output_path = output_path or script_path
-    
-    # Get original script timestamp and content
-    orig_time = script_path.stat().st_mtime
-    with open(script_path, 'rb') as f:
-        script_content = f.read()
 
     # Create zip of dependencies
     deps = find_module_dependencies(script_path)
@@ -145,33 +139,30 @@ def pack(script_path, output_path=None):
     file_deps = expand_distributions(mixed_deps)
     zip_buffer = create_zip_archive(file_deps)
     
-    # Write combined file
-    with open(output_path, 'wb') as f:
-        f.write(script_content)
-        f.write(zip_buffer.getvalue())
+    # Create temporary file
+    temp_path = output_path.with_suffix('.CarryOn.tmp')
+    temp_path.write_bytes(script_path.read_bytes() + zip_buffer.getvalue())
     
-    # Restore timestamp
-    os.utime(output_path, (orig_time, orig_time))
+    # Copy metadata and replace target
+    shutil.copystat(script_path, temp_path)
+    temp_path.replace(output_path)
 
 def strip(script_path, output_path=None):
     """Remove zip from file"""
     script_path = Path(script_path)
     output_path = output_path or script_path
     
-    # Get original timestamp
-    orig_time = script_path.stat().st_mtime
+    # Get size of original script before zip
+    size = find_script_size(script_path)
+
+    # Create temporary file in same directory
+    temp_path = output_path.with_suffix('.tmp')
+    with open(script_path, 'rb') as src, open(temp_path, 'wb') as dst:
+        dst.write(src.read(size))
     
-    if output_path != script_path:
-        # Copy file first if output path different
-        shutil.copy2(script_path, output_path)
-    
-    # Truncate to remove zip portion
-    size = find_script_size(output_path)
-    with open(output_path, 'r+b') as f:
-        f.truncate(size)
-        
-    # Restore timestamp
-    os.utime(output_path, (orig_time, orig_time))
+    # Copy metadata and replace target
+    shutil.copystat(script_path, temp_path)
+    temp_path.replace(output_path)
 
 def unpack(script_path, output_dir=None):
     """Extract zip to directory"""
@@ -181,10 +172,13 @@ def unpack(script_path, output_dir=None):
     else:
         output_dir = Path(output_dir)
     
+    if output_dir.exists():
+        print(f"Note: Output directory {output_dir} already exists and may be removed.")
+    
     size = find_script_size(script_path)
     with open(script_path, 'rb') as f:
-        data = f.read()
-        zip_data = io.BytesIO(data[size:])
+        f.seek(size)
+        zip_data = io.BytesIO(f.read())
         with ZipFile(zip_data) as zf:
             zf.extractall(output_dir)
         
@@ -195,30 +189,30 @@ def repack(script_path, dir_path=None, output_path=None):
     if dir_path is None:
         dir_path = script_path.with_suffix('.d')
     
-    # Get original script timestamp and content
-    orig_time = script_path.stat().st_mtime
+    # Get size of original script before zip
     size = find_script_size(script_path)
-    with open(script_path, 'rb') as f:
-        orig_script = f.read(size)
-    
+
     # Create zip from directory contents
     file_deps = collect_from_directory(dir_path)
     zip_buffer = create_zip_archive(file_deps)
+
+    # Create temporary file
+    temp_path = output_path.with_suffix('.tmp')
+    with open(script_path, 'rb') as src:
+        script_content = src.read(size)
+        with open(temp_path, 'wb') as dst:
+            dst.write(script_content)
+            dst.write(zip_buffer.getvalue())
     
-    # Write combined file
-    with open(output_path, 'wb') as f:
-        f.write(orig_script)
-        f.write(zip_buffer.getvalue())
-    
-    # Restore timestamp
-    os.utime(output_path, (orig_time, orig_time))
+    # Copy metadata and replace target
+    shutil.copystat(script_path, temp_path)
+    temp_path.replace(output_path)
 
 def main():
     parser = argparse.ArgumentParser(description="CarryOn - Pack Python dependencies with scripts")
     parser.add_argument('command', choices=['pack', 'strip', 'unpack', 'repack'])
-    parser.add_argument('script', help='Python script to process')
-    parser.add_argument('-o', '--output', help='Output file/directory')
-    parser.add_argument('-d', '--dir', help='Directory for repack')
+    parser.add_argument('script', type=Path, help='Python script to process')
+    parser.add_argument('-o', '--output', type=Path, help='Output file/directory')
     
     args = parser.parse_args()
     
@@ -229,7 +223,7 @@ def main():
     elif args.command == 'unpack':
         unpack(args.script, args.output)
     elif args.command == 'repack':
-        repack(args.script, args.dir, args.output)
+        repack(args.script, output_path=args.output)
 
 if __name__ == '__main__':
     main()
