@@ -22,6 +22,8 @@ BOOTSTRAP_CODE = b'''exec(compile(
     'exec'                  # compile in 'exec' mode
 ))'''
 
+CARRYON_MARKER = b'\n\n##CarryOn bundled dependencies below this line\n'
+
 def find_module_dependencies(script_path):
     # Convert script path to absolute and sys.path to Path objects
     script_path = Path(script_path).resolve()
@@ -126,7 +128,7 @@ def create_zip_archive(file_deps, timestamp, uncompressed=False):
             info.date_time = date_time
             info.compress_type = compression
             zf.writestr(info, fullpath.read_bytes())
-    return buffer.getvalue()
+    return CARRYON_MARKER + buffer.getvalue()
 
 def collect_from_directory(dirpath):
     """Generate base, relpath pairs from an unpacked directory"""
@@ -138,6 +140,12 @@ def collect_from_directory(dirpath):
 def find_script_size(path):
     """Find size of script without appended zip"""
     data = path.read_bytes()
+    # First try to find the marker
+    marker_pos = data.find(CARRYON_MARKER)
+    if marker_pos != -1:
+        return marker_pos
+        
+    # If no marker found, try to find zip header
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             return zf.filelist[0].header_offset
