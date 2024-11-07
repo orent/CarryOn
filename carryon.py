@@ -5,7 +5,7 @@ import os
 import argparse
 import sysconfig
 import shutil
-from zipfile import ZipFile, ZipInfo, BadZipFile
+import zipfile
 from modulefinder import ModuleFinder
 from pathlib import Path
 from importlib.metadata import distributions
@@ -106,22 +106,25 @@ def expand_distributions(mixed_deps, exclude_pyc=True):
                 continue
             yield base, Path(file)
 
-def create_zip_archive(file_deps, timestamp):
+def create_zip_archive(file_deps, timestamp, uncompressed=False):
     buffer = io.BytesIO()
-    with ZipFile(buffer, 'w') as zf:
+    compression = zipfile.ZIP_STORED if uncompressed else zipfile.ZIP_DEFLATED
+    with zipfile.ZipFile(buffer, 'w', compression=compression) as zf:
         # Convert time to zip format
         date_time = datetime.fromtimestamp(timestamp).timetuple()[:6]
         
         # Add bootstrap code as __main__.py
-        main = ZipInfo('__main__.py')
+        main = zipfile.ZipInfo('__main__.py')
         main.date_time = date_time
+        main.compress_type = compression
         zf.writestr(main, BOOTSTRAP_CODE)
         
         entries = [(relpath, base) for base, relpath in file_deps]
         for relpath, base in sorted(entries):
             fullpath = base / relpath
-            info = ZipInfo.from_file(fullpath, str(relpath))
+            info = zipfile.ZipInfo.from_file(fullpath, str(relpath))
             info.date_time = date_time
+            info.compress_type = compression
             zf.writestr(info, fullpath.read_bytes())
     return buffer.getvalue()
 
@@ -136,12 +139,12 @@ def find_script_size(path):
     """Find size of script without appended zip"""
     data = path.read_bytes()
     try:
-        with ZipFile(io.BytesIO(data)) as zf:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
             return zf.filelist[0].header_offset
-    except BadZipFile:
+    except zipfile.BadZipFile:
         return len(data)
 
-def pack(script_path, output_path=None):
+def pack(script_path, output_path=None, uncompressed=False):
     """Generate and append zip to script"""
     script_path = Path(script_path)
     output_path = output_path or script_path
@@ -151,7 +154,7 @@ def pack(script_path, output_path=None):
     deps = find_module_dependencies(script_path)
     mixed_deps = resolve_to_distributions(deps)
     file_deps = expand_distributions(mixed_deps)
-    zip = create_zip_archive(file_deps, timestamp)
+    zip = create_zip_archive(file_deps, timestamp, uncompressed)
     
     # Create temporary file
     temp_path = output_path.with_suffix('.CarryOn.tmp')
@@ -190,11 +193,11 @@ def unpack(script_path, output_dir=None):
         print(f"Note: directory {output_dir} already exists. Consider removing it first.")
     
     data = script_path.read_bytes()
-    with ZipFile(io.BytesIO(data)) as zf:
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
         members = [f for f in zf.filelist if f.filename != '__main__.py']
         zf.extractall(output_dir, members)
 
-def repack(script_path, output_path=None):
+def repack(script_path, output_path=None, uncompressed=False):
     """Generate zip from unpacked directory"""
     script_path = Path(script_path)
     output_path = output_path or script_path
@@ -207,7 +210,7 @@ def repack(script_path, output_path=None):
 
     # Create zip from directory contents with script's timestamp
     file_deps = collect_from_directory(dir_path)
-    zip = create_zip_archive(file_deps, timestamp)
+    zip = create_zip_archive(file_deps, timestamp, uncompressed)
 
     # Create temporary file
     temp_path = output_path.with_suffix('.CarryOn.tmp')
@@ -222,17 +225,19 @@ def main():
     parser.add_argument('command', choices=['pack', 'strip', 'unpack', 'repack'])
     parser.add_argument('script', type=Path, help='Python script to process')
     parser.add_argument('-o', '--output', type=Path, help='Output file/directory')
+    parser.add_argument('-0', '--uncompressed', action='store_true', 
+                      help='Store files uncompressed (default is to use deflate compression)')
     
     args = parser.parse_args()
     
     if args.command == 'pack':
-        pack(args.script, args.output)
+        pack(args.script, args.output, args.uncompressed)
     elif args.command == 'strip':
         strip(args.script, args.output)
     elif args.command == 'unpack':
         unpack(args.script, args.output)
     elif args.command == 'repack':
-        repack(args.script, args.output)
+        repack(args.script, args.output, args.uncompressed)
 
 if __name__ == '__main__':
     main()
