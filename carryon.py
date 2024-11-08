@@ -22,7 +22,7 @@ BOOTSTRAP_CODE = b'''exec(compile(
     'exec'                  # compile in 'exec' mode
 ))'''
 
-CARRYON_MARKER = b'\n\n##CarryOn bundled dependencies below this line\n'
+CARRYON_MARKER = b'\n\n##CarryOn bundled dependencies below this line##\n'
 
 def find_module_dependencies(script_path):
     # Convert script path to absolute and sys.path to Path objects
@@ -189,40 +189,59 @@ def strip(script_path, output_path=None):
     shutil.copystat(script_path, temp_path)
     temp_path.replace(output_path)
 
-def unpack(script_path, output_dir=None):
-    """Extract zip to directory"""
+def unpack(script_path, output_path=None):
+    """Extract zip to directory and strip the script"""
     script_path = Path(script_path)
-    if output_dir is None:
-        output_dir = script_path.with_suffix('.d')
+    if output_path is None:
+        output_path = script_path
     else:
-        output_dir = Path(output_dir)
+        output_path = Path(output_path)
     
-    if output_dir.exists():
-        print(f"Note: directory {output_dir} already exists. Consider removing it first.")
+    # Create the unpack directory
+    unpack_dir = script_path.with_suffix('.d')
+    if unpack_dir.exists():
+        print(f"Note: directory {unpack_dir} already exists. Consider removing it first.")
+
+    # Get size of original script before zip
+    size = find_script_size(script_path)
     
+    # Read and process data
     data = script_path.read_bytes()
+    
+    # Extract the zip contents
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         members = [f for f in zf.filelist if f.filename != '__main__.py']
-        zf.extractall(output_dir, members)
+        zf.extractall(unpack_dir, members)
+    
+    # Create temporary file with stripped script
+    temp_path = output_path.with_suffix('.CarryOn.tmp')
+    temp_path.write_bytes(data[:size])
+    
+    # Copy metadata and replace target
+    shutil.copystat(script_path, temp_path)
+    temp_path.replace(output_path)
 
 def repack(script_path, output_path=None, uncompressed=False):
-    """Generate zip from unpacked directory"""
+    """Repack zip from unpacked directory and create stripped file"""
     script_path = Path(script_path)
-    output_path = output_path or script_path
+    if output_path is None:
+        output_path = script_path
+    else:
+        output_path = Path(output_path)
     dir_path = script_path.with_suffix('.d')
     
-    # Get original script timestamp
+    # Get original script content without zip
     size = find_script_size(script_path)
-    data = script_path.read_bytes()
-    timestamp = script_path.stat().st_mtime
-
+    script_content = script_path.read_bytes()[:size]
+    
     # Create zip from directory contents with script's timestamp
+    timestamp = script_path.stat().st_mtime
     file_deps = collect_from_directory(dir_path)
     zip = create_zip_archive(file_deps, timestamp, uncompressed)
 
     # Create temporary file
     temp_path = output_path.with_suffix('.CarryOn.tmp')
-    temp_path.write_bytes(data[:size] + zip)
+    temp_path.write_bytes(script_content + zip)
     
     # Copy metadata and replace target
     shutil.copystat(script_path, temp_path)
@@ -232,7 +251,7 @@ def main():
     parser = argparse.ArgumentParser(description="CarryOn - Pack Python dependencies with scripts")
     parser.add_argument('command', choices=['pack', 'strip', 'unpack', 'repack'])
     parser.add_argument('script', type=Path, help='Python script to process')
-    parser.add_argument('-o', '--output', type=Path, help='Output file/directory')
+    parser.add_argument('-o', '--output', type=Path, help='Output file')
     parser.add_argument('-0', '--uncompressed', action='store_true', 
                       help='Store files uncompressed (default is to use deflate compression)')
     
