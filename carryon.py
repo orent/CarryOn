@@ -8,8 +8,12 @@ import shutil
 import zipfile
 from modulefinder import ModuleFinder
 from pathlib import Path
-from importlib.metadata import distributions
 from datetime import datetime
+try:
+    from importlib.metadata import distributions
+except ImportError:
+    pass
+
 # Bootstrap code that will be saved as __main__.py in the zip
 BOOTSTRAP_CODE = b'''# Import zipext for extension module support
 try:
@@ -381,6 +385,26 @@ def repack(script_path, output_path=None, uncompressed=False, excludes=None):
     # Copy metadata and replace target
     shutil.copystat(script_path, temp_path)
     temp_path.replace(output_path)
+
+
+# Where importlib.metadata is not available:
+def distributions_fallback():
+    class Dist:
+        def __init__(self, dist):
+            self.name = dist.name
+            self._base = Path(dist.path).parent
+            self.files = [Path(f[0]) for f in dist.list_installed_files()]
+
+        def locate_file(self, path):
+            return self._base / path
+    from pip._vendor.distlib.database import DistributionPath
+    return (Dist(d) for d in DistributionPath().get_distributions())
+
+
+try:
+    distributions
+except NameError:
+    distributions = distributions_fallback
 
 
 def main():
