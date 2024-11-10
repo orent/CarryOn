@@ -10,9 +10,13 @@ from modulefinder import ModuleFinder
 from pathlib import Path
 from importlib.metadata import distributions
 from datetime import datetime
-
 # Bootstrap code that will be saved as __main__.py in the zip
-BOOTSTRAP_CODE = b'''exec(compile(
+BOOTSTRAP_CODE = b'''# Import zipext for extension module support
+try:
+    __import__('zipext')
+except ImportError:
+    pass
+exec(compile(
     # The zip from which __main__ was loaded:
     open(__loader__.archive, 'rb').read(
         # minimum offset = size of file before zip start:
@@ -23,7 +27,9 @@ BOOTSTRAP_CODE = b'''exec(compile(
 ))'''
 
 CARRYON_MARKER = b'\n\n##CarryOn bundled dependencies below this line##\n'
-
+class ZipextNotFoundError(Exception):
+    """Raised when zipext is needed but not available"""
+    pass
 def find_module_dependencies(script_path):
     # Convert script path to absolute and sys.path to Path objects
     script_path = Path(script_path).resolve()
@@ -66,7 +72,99 @@ def find_module_dependencies(script_path):
         if result[0] in stdlib_paths:
             continue
         yield result
-
+def normalize_excludes(excludes):
+    """Convert exclude options to set of module names to exclude"""
+    result = set()
+    if not excludes:
+        return result
+    
+    # Handle comma-separated lists and multiple occurrences
+    for item in excludes:
+        result.update(name.strip() for name in item.split(','))
+    return result
+def filter_mixed_deps(mixed_deps, excludes):
+    """Filter mixed dependencies list based on exclude patterns"""
+    if not excludes:
+        yield from mixed_deps
+        return
+        
+    excludes = normalize_excludes(excludes)
+    for base, item in mixed_deps:
+        # For distributions, check package name
+        if hasattr(item, 'files'):
+            if item.metadata['Name'] not in excludes:
+                yield base, item
+            continue
+            
+        # For module paths, check if path starts with any exclude pattern
+        relpath = str(item)
+        module_name = relpath.replace('/', '.').replace('\\', '.')
+        if module_name.endswith('.py'):
+            module_name = module_name[:-3]
+        elif module_name.endswith('.pyc'):
+            module_name = module_name[:-4]
+            
+        # Skip if module matches any exclude pattern
+        if any(module_name == ex or module_name.startswith(ex + '.')
+               for ex in excludes):
+            continue
+            
+        yield base, item
+def filter_file_deps(file_deps, excludes):
+    """Filter file dependencies list based on exclude patterns"""
+    if not excludes:
+        yield from file_deps
+        return
+        
+    excludes = normalize_excludes(excludes)
+    for base, relpath in file_deps:
+        # Convert path to module name format
+        path_str = str(relpath)
+        module_name = path_str.replace('/', '.').replace('\\', '.')
+        if module_name.endswith('.py'):
+            module_name = module_name[:-3]
+        elif module_name.endswith('.pyc'):
+            module_name = module_name[:-4]
+            
+        # Skip if module matches any exclude pattern
+        if any(module_name == ex or module_name.startswith(ex + '.')
+               for ex in excludes):
+            continue
+            
+        yield base, relpath
+def process_extension_modules(deps):
+    """Process list looking for extension modules, adding zipext if needed"""
+    has_extensions = False
+    for base, relpath in deps:
+        if str(relpath).endswith(('.so', '.pyd')):
+            has_extensions = True
+            break
+            
+    if has_extensions:
+        # Try to find zipext module
+        finder = ModuleFinder()
+        try:
+            finder.find_module('zipext')
+        except ImportError:
+            raise ZipextNotFoundError(
+                "Extension modules found but zipext not available.\n"
+                "Please install zipext with: pip install zipext"
+            )
+            
+        # Find zipext location and add to deps
+        for module in finder.modules.values():
+            if module.__name__ == 'zipext':
+                modpath = Path(module.__file__).resolve()
+                for base in sys.path:
+                    try:
+                        relpath = modpath.relative_to(Path(base))
+                        yield base, relpath
+                        break
+                    except ValueError:
+                        continue
+                
+    # Pass through original deps
+    yield from deps
 def resolve_to_distributions(module_deps):
     # Build map of absolute file paths to distributions
     path_map = {}
@@ -151,8 +249,7 @@ def find_script_size(path):
             return zf.filelist[0].header_offset
     except zipfile.BadZipFile:
         return len(data)
-
-def pack(script_path, output_path=None, uncompressed=False):
+def pack(script_path, output_path=None, uncompressed=False, skip_pkgs=False, excludes=None):
     """Generate and append zip to script"""
     script_path = Path(script_path)
     output_path = output_path or script_path
@@ -160,9 +257,19 @@ def pack(script_path, output_path=None, uncompressed=False):
     # Create zip of dependencies with script's timestamp
     timestamp = script_path.stat().st_mtime
     deps = find_module_dependencies(script_path)
-    mixed_deps = resolve_to_distributions(deps)
-    file_deps = expand_distributions(mixed_deps)
-    zip = create_zip_archive(file_deps, timestamp, uncompressed)
+    try:
+        deps = process_extension_modules(deps)
+        if skip_pkgs:
+            file_deps = filter_file_deps(deps, excludes)
+        else:
+            mixed_deps = resolve_to_distributions(deps)
+            mixed_deps = filter_mixed_deps(mixed_deps, excludes)
+            file_deps = expand_distributions(mixed_deps)
+            file_deps = filter_file_deps(file_deps, excludes)
+        zip = create_zip_archive(file_deps, timestamp, uncompressed)
+    except ZipextNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
     
     # Create temporary file
     temp_path = output_path.with_suffix('.CarryOn.tmp')
@@ -220,8 +327,7 @@ def unpack(script_path, output_path=None):
     # Copy metadata and replace target
     shutil.copystat(script_path, temp_path)
     temp_path.replace(output_path)
-
-def repack(script_path, output_path=None, uncompressed=False):
+def repack(script_path, output_path=None, uncompressed=False, excludes=None):
     """Repack zip from unpacked directory and create stripped file"""
     script_path = Path(script_path)
     if output_path is None:
@@ -237,8 +343,13 @@ def repack(script_path, output_path=None, uncompressed=False):
     # Create zip from directory contents with script's timestamp
     timestamp = script_path.stat().st_mtime
     file_deps = collect_from_directory(dir_path)
-    zip = create_zip_archive(file_deps, timestamp, uncompressed)
-
+    try:
+        file_deps = process_extension_modules(file_deps)
+        file_deps = filter_file_deps(file_deps, excludes)
+        zip = create_zip_archive(file_deps, timestamp, uncompressed)
+    except ZipextNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
     # Create temporary file
     temp_path = output_path.with_suffix('.CarryOn.tmp')
     temp_path.write_bytes(script_content + zip)
@@ -254,17 +365,20 @@ def main():
     parser.add_argument('-o', '--output', type=Path, help='Output file')
     parser.add_argument('-0', '--uncompressed', action='store_true', 
                       help='Store files uncompressed (default is to use deflate compression)')
+    parser.add_argument('-m', '--modules-only', action='store_true',
+                      help='Skip package resolution and pack module files directly')
+    parser.add_argument('-x', '--exclude', action='append',
+                      help='Exclude package or module (may be specified multiple times, comma-separated)')
     
     args = parser.parse_args()
     
     if args.command == 'pack':
-        pack(args.script, args.output, args.uncompressed)
+        pack(args.script, args.output, args.uncompressed, args.modules_only, args.exclude)
     elif args.command == 'strip':
         strip(args.script, args.output)
     elif args.command == 'unpack':
         unpack(args.script, args.output)
     elif args.command == 'repack':
-        repack(args.script, args.output, args.uncompressed)
-
+        repack(args.script, args.output, args.uncompressed, args.exclude)
 if __name__ == '__main__':
     main()
